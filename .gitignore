@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Logs and coverage
+*.log
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# IDE/editor
+.idea/
+.vscode/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local runtime
+.env
+.env.*
+.python-version
+
+# Docker
+*.tar
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Cache
+.cache/
+
+# Serverless/packaging
+.aws-sam/
+.serverless/
+package.zip
