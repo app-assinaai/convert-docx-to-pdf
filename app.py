@@ -6,7 +6,12 @@ from werkzeug.exceptions import BadRequest
 from io import BytesIO
 import traceback
 
-from services.docx_service import extract_variables, replace_variables
+from services.docx_service import (
+    extract_variables,
+    replace_variables,
+    extract_variables_and_convert_pdf,
+    extract_convert_upload_get_url,
+)
 from services.pdf_service import convert_docx_to_pdf
 from utils.validators import validate_docx_file, validate_variables_mapping
 
@@ -205,6 +210,135 @@ def process_document_endpoint():
             'message': str(e)
         }), 500
 
+
+@app.route('/api/extract-and-convert', methods=['POST'])
+def extract_and_convert_endpoint():
+    """
+    Extract variables and convert DOCX to PDF in one request.
+
+    Request: multipart/form-data with:
+        - 'file': DOCX file (required)
+        - 'variables': JSON string mapping variable names to values (optional)
+    Response: JSON containing variables list and base64-encoded PDF
+    {
+      "variables": ["name", "date"],
+      "pdfBase64": "JVBERi0xLjQK..."
+    }
+    """
+    try:
+        # Validate file
+        if 'file' not in request.files:
+            raise BadRequest("No file provided in request")
+
+        file = request.files['file']
+        validate_docx_file(file)
+
+        # Parse optional variables JSON
+        variables = None
+        variables_json = request.form.get('variables')
+        if variables_json:
+            import json
+            try:
+                variables = json.loads(variables_json)
+            except json.JSONDecodeError:
+                raise BadRequest("Invalid JSON in variables field")
+            validate_variables_mapping(variables)
+
+        # Read file content
+        docx_content = file.read()
+
+        # Execute combined operation
+        variables_list, pdf_bytes = extract_variables_and_convert_pdf(
+            docx_content, variables
+        )
+
+        # Encode PDF to base64
+        import base64
+        pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
+
+        return jsonify({
+            'variables': variables_list,
+            'pdfBase64': pdf_base64,
+        }), 200
+
+    except BadRequest as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({
+            'error': 'Failed to extract and convert',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/api/extract-convert-upload', methods=['POST'])
+def extract_convert_upload_endpoint():
+    """
+    Extract variables, optionally replace, convert to PDF, upload to S3, and return a 1-day presigned URL.
+
+    Request: multipart/form-data with:
+        - 'file': DOCX file (required)
+        - 'variables': JSON string mapping variable names to values (optional)
+        - 's3Prefix': Optional path prefix for the S3 object key (e.g., "tenant-123/")
+        - 'bucket': Optional S3 bucket override (default: assinaai-temp)
+        - 'ttlSeconds': Optional expiration seconds (default: 86400)
+    Response: JSON containing variables list and presignedUrl
+    {
+      "variables": ["name", "date"],
+      "presignedUrl": "https://..."
+    }
+    """
+    try:
+        # Validate file
+        if 'file' not in request.files:
+            raise BadRequest("No file provided in request")
+
+        file = request.files['file']
+        validate_docx_file(file)
+
+        # Optional variables
+        variables = None
+        variables_json = request.form.get('variables')
+        if variables_json:
+            import json
+            try:
+                variables = json.loads(variables_json)
+            except json.JSONDecodeError:
+                raise BadRequest("Invalid JSON in variables field")
+            validate_variables_mapping(variables)
+
+        # Optional S3 inputs
+        s3_prefix = request.form.get('s3Prefix')
+        bucket_override = request.form.get('bucket') or 'assinaai-temp'
+        ttl_seconds_raw = request.form.get('ttlSeconds')
+        try:
+            ttl_seconds = int(ttl_seconds_raw) if ttl_seconds_raw else 86400
+        except ValueError:
+            raise BadRequest("ttlSeconds must be an integer")
+
+        # Read file content
+        docx_content = file.read()
+
+        # Execute combined operation with upload
+        variables_list, url = extract_convert_upload_get_url(
+            docx_content=docx_content,
+            variables=variables,
+            bucket_name=bucket_override,
+            s3_prefix=s3_prefix,
+            presign_ttl_seconds=ttl_seconds,
+        )
+
+        return jsonify({
+            'variables': variables_list,
+            'presignedUrl': url,
+        }), 200
+
+    except BadRequest as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({
+            'error': 'Failed to extract, convert and upload',
+            'message': str(e)
+        }), 500
 
 @app.errorhandler(404)
 def not_found(error):

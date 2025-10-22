@@ -1,9 +1,13 @@
 """DOCX file manipulation service"""
 
 import re
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
 from docx import Document
 from io import BytesIO
+from services.pdf_service import convert_docx_to_pdf
+from services.s3_service import upload_bytes_to_s3, generate_presigned_get_url
+import os
+import uuid
 
 
 def extract_variables(docx_content: bytes) -> List[str]:
@@ -122,4 +126,74 @@ def _replace_in_paragraph(paragraph, variables: Dict[str, str]) -> None:
             # Regular text
             if part:
                 paragraph.add_run(part)
+
+
+def extract_variables_and_convert_pdf(
+    docx_content: bytes,
+    variables: Optional[Dict[str, str]] = None,
+) -> Tuple[List[str], bytes]:
+    """
+    Extract variables and convert DOCX (optionally with replacements) to PDF.
+
+    Args:
+        docx_content: Original DOCX bytes.
+        variables: Optional mapping for replacements. If provided, replacements are applied before PDF conversion.
+
+    Returns:
+        A tuple of (variables_list, pdf_bytes).
+    """
+    extracted_variables = extract_variables(docx_content)
+
+    # If variables provided, replace before converting; otherwise convert original
+    docx_for_conversion = (
+        replace_variables(docx_content, variables) if variables else docx_content
+    )
+
+    pdf_bytes = convert_docx_to_pdf(docx_for_conversion)
+    return extracted_variables, pdf_bytes
+
+
+def extract_convert_upload_get_url(
+    docx_content: bytes,
+    variables: Optional[Dict[str, str]] = None,
+    bucket_name: str = "assinaai-temp",
+    s3_prefix: Optional[str] = None,
+    presign_ttl_seconds: int = 86400,
+) -> Tuple[List[str], str]:
+    """
+    Extract variables, (optionally) replace, convert to PDF, upload to S3, return presigned URL.
+
+    Args:
+        docx_content: DOCX bytes input.
+        variables: Optional mapping to replace in DOCX prior to conversion.
+        bucket_name: S3 bucket to upload the PDF to.
+        s3_prefix: Optional key prefix in the bucket.
+        presign_ttl_seconds: Expiration for presigned URL (default 1 day).
+
+    Returns:
+        (variables_list, presigned_url)
+    """
+    extracted_variables = extract_variables(docx_content)
+    final_docx = replace_variables(docx_content, variables) if variables else docx_content
+    pdf_bytes = convert_docx_to_pdf(final_docx)
+
+    # Key generation: optional prefix + uuid-based filename
+    prefix = (s3_prefix or "generated-pdfs").strip("/")
+    unique_id = uuid.uuid4().hex
+    key = f"{prefix}/{unique_id}.pdf" if prefix else f"{unique_id}.pdf"
+
+    # Upload with content type
+    upload_bytes_to_s3(
+        bucket=bucket_name,
+        key=key,
+        data=pdf_bytes,
+        content_type="application/pdf",
+    )
+
+    url = generate_presigned_get_url(
+        bucket=bucket_name,
+        key=key,
+        expires_in_seconds=presign_ttl_seconds,
+    )
+    return extracted_variables, url
 

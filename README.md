@@ -8,6 +8,7 @@ A Flask REST API for extracting variables from DOCX files, replacing them with p
 - **Replace Variables**: Replace variables in DOCX files with provided values
 - **Convert to PDF**: Convert DOCX files to PDF format
 - **Process Document**: Combined operation (replace variables + convert to PDF)
+- **Extract and Convert**: Extract variables and get a PDF in a single request
 
 ## Tech Stack
 
@@ -32,13 +33,13 @@ sudo apt-get update && sudo apt-get install -y libreoffice
 2. Make the start script executable:
 
 ```bash
-chmod +x start.sh
+chmod +x start_local.sh
 ```
 
 3. Run the application:
 
 ```bash
-./start.sh
+./start_local.sh
 ```
 
 The script will:
@@ -165,6 +166,82 @@ curl -X POST http://localhost:5000/api/process-document \
   -o processed.pdf
 ```
 
+### 6. Extract and Convert (Single Call)
+
+**POST** `/api/extract-and-convert`
+
+Extract variables and convert the DOCX to PDF in one call. Optionally supply replacements; if omitted, the original DOCX is converted.
+
+**Request:**
+
+- Content-Type: `multipart/form-data`
+- Body:
+  - `file` (DOCX file, required)
+  - `variables` (JSON string, optional)
+
+**Response:**
+
+```json
+{
+  "variables": ["name", "date", "company"],
+  "pdfBase64": "JVBERi0xLjQK..."
+}
+```
+
+**Example (cURL):**
+
+```bash
+curl -s -X POST http://localhost:5000/api/extract-and-convert \
+  -F "file=@document.docx" \
+  -F 'variables={"name":"John Doe","date":"2024-01-15","company":"Acme Inc"}' \
+| jq -r .pdfBase64 | base64 -d > output.pdf
+```
+
+If you don't want to replace variables, omit the `variables` field:
+
+```bash
+curl -s -X POST http://localhost:5000/api/extract-and-convert \
+  -F "file=@document.docx" \
+| jq -r .pdfBase64 | base64 -d > output.pdf
+```
+
+### 7. Extract, Convert, and Upload to S3 (Presigned URL)
+
+**POST** `/api/extract-convert-upload`
+
+Extract variables, optionally replace, convert to PDF, upload to S3 bucket `assinaai-temp`, and return a 1-day presigned URL.
+
+**Request:**
+
+- Content-Type: `multipart/form-data`
+- Body:
+  - `file` (DOCX file, required)
+  - `variables` (JSON string, optional)
+  - `s3Prefix` (optional string; e.g., `tenant-123/letters`)
+  - `bucket` (optional string; defaults to `assinaai-temp`)
+  - `ttlSeconds` (optional integer; default `86400` = 1 day)
+
+**Response:**
+
+```json
+{
+  "variables": ["name", "date"],
+  "presignedUrl": "https://assinaai-temp.s3.amazonaws.com/..."
+}
+```
+
+**Example (cURL):**
+
+```bash
+curl -X POST http://localhost:5000/api/extract-convert-upload \
+  -F "file=@document.docx" \
+  -F 'variables={"name":"John Doe","date":"2024-01-15"}' \
+  -F "s3Prefix=tenant-123/letters" \
+  -F "ttlSeconds=86400"
+```
+
+AWS credentials and permissions must allow `s3:PutObject` and `s3:GetObject` on the specified bucket/key. When running on Lambda, the default role should include these permissions.
+
 ## Variable Format
 
 Variables in the DOCX file must be in the format: `{{variable_name}}`
@@ -247,7 +324,7 @@ Error response format:
 │   ├── __init__.py
 │   └── validators.py     # File validation utilities
 ├── requirements.txt       # Python dependencies
-├── start.sh              # Script to run locally
+├── start_local.sh        # Script to run locally
 └── README.md             # Documentation
 ```
 
@@ -255,10 +332,10 @@ Error response format:
 
 ### Running in Development Mode
 
-The Flask app runs with debug mode enabled by default when using `start.sh`:
+The Flask app runs with debug mode enabled by default when using `start_local.sh`:
 
 ```bash
-./start.sh
+./start_local.sh
 ```
 
 ### Manual Setup
@@ -312,4 +389,5 @@ For a quick deployment guide, see [QUICK_START.md](QUICK_START.md)
 ## License
 
 MIT
+
 # convert-docx-to-pdf
