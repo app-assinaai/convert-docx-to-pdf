@@ -1,11 +1,15 @@
 """DOCX file manipulation service"""
 
 import re
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from docx import Document
 from io import BytesIO
 from services.pdf_service import convert_docx_to_pdf
-from services.s3_service import upload_bytes_to_s3, generate_presigned_get_url
+from services.s3_service import (
+    upload_bytes_to_s3,
+    generate_presigned_get_url,
+    get_object_bytes,
+)
 import os
 import uuid
 
@@ -159,9 +163,9 @@ def extract_convert_upload_get_url(
     bucket_name: str = "assinaai-temp",
     s3_prefix: Optional[str] = None,
     presign_ttl_seconds: int = 86400,
-) -> Tuple[List[str], str]:
+) -> Dict[str, Any]:
     """
-    Extract variables, (optionally) replace, convert to PDF, upload to S3, return presigned URL.
+    Extract variables, (optionally) replace, convert to PDF, upload to S3, return details.
 
     Args:
         docx_content: DOCX bytes input.
@@ -171,7 +175,10 @@ def extract_convert_upload_get_url(
         presign_ttl_seconds: Expiration for presigned URL (default 1 day).
 
     Returns:
-        (variables_list, presigned_url)
+        Dict with keys:
+          - variables: List[str]
+          - pdfKey: str
+          - presignedUrl: str
     """
     extracted_variables = extract_variables(docx_content)
     final_docx = replace_variables(docx_content, variables) if variables else docx_content
@@ -195,5 +202,101 @@ def extract_convert_upload_get_url(
         key=key,
         expires_in_seconds=presign_ttl_seconds,
     )
-    return extracted_variables, url
+    return {
+        "variables": extracted_variables,
+        "pdfKey": key,
+        "presignedUrl": url,
+    }
+
+
+def replace_from_s3_convert_and_upload(
+    source_bucket: str,
+    source_key: str,
+    variables: Any,
+    target_bucket: str,
+    target_prefix: Optional[str] = None,
+    presign_ttl_seconds: int = 86400,
+) -> Dict[str, str]:
+    """
+    Download DOCX from S3, replace variables, convert to PDF, upload PDF to target bucket, return presigned URL.
+
+    Args:
+        source_bucket: Bucket containing the input DOCX.
+        source_key: Key of the input DOCX.
+        variables: Mapping to apply to the DOCX.
+        target_bucket: Bucket where the generated PDF will be uploaded.
+        target_prefix: Optional prefix for target keys.
+        presign_ttl_seconds: Expiration time for presigned URLs.
+
+    Returns:
+        Dict with keys: variables (comma-joined string), pdfKey, pdfUrl
+    """
+    # Download original DOCX
+    original_docx = get_object_bytes(source_bucket, source_key)
+
+    # Replace variables
+    normalized_vars = normalize_variables_input(variables)
+    modified_docx = replace_variables(original_docx, normalized_vars)
+
+    # Convert to PDF
+    pdf_bytes = convert_docx_to_pdf(modified_docx)
+
+    # Build key for PDF only
+    prefix = (target_prefix or "processed").strip("/")
+    base_id = uuid.uuid4().hex
+    pdf_key = f"{prefix}/{base_id}.pdf" if prefix else f"{base_id}.pdf"
+
+    # Upload PDF only
+    upload_bytes_to_s3(
+        bucket=target_bucket,
+        key=pdf_key,
+        data=pdf_bytes,
+        content_type="application/pdf",
+    )
+
+    # Presigned URL (optional)
+    # pdf_url = generate_presigned_get_url(target_bucket, pdf_key, presign_ttl_seconds)
+
+    return {
+        "pdfKey": pdf_key,
+        # "pdfUrl": pdf_url,
+    }
+
+
+def normalize_variables_input(variables_input: Any) -> Dict[str, str]:
+    """
+    Normalize variables provided as either:
+      - dict { name: value }
+      - list of objects [{ name, value, ... }]
+
+    Returns a mapping of { name: value } with stringified values.
+    """
+    if variables_input is None:
+        return {}
+
+    if isinstance(variables_input, dict):
+        normalized: Dict[str, str] = {}
+        for k, v in variables_input.items():
+            key_str = str(k)
+            value_str = "" if v is None else str(v)
+            if key_str:
+                normalized[key_str] = value_str
+        return normalized
+
+    if isinstance(variables_input, list):
+        normalized: Dict[str, str] = {}
+        for item in variables_input:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if name is None:
+                continue
+            value = item.get("value", "")
+            name_str = str(name)
+            value_str = "" if value is None else str(value)
+            if name_str:
+                normalized[name_str] = value_str
+        return normalized
+
+    raise ValueError("variables must be a dict or an array of objects with name/value")
 

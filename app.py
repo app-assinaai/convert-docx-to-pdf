@@ -11,6 +11,8 @@ from services.docx_service import (
     replace_variables,
     extract_variables_and_convert_pdf,
     extract_convert_upload_get_url,
+    replace_from_s3_convert_and_upload,
+    normalize_variables_input,
 )
 from services.pdf_service import convert_docx_to_pdf
 from utils.validators import validate_docx_file, validate_variables_mapping
@@ -281,9 +283,10 @@ def extract_convert_upload_endpoint():
         - 's3Prefix': Optional path prefix for the S3 object key (e.g., "tenant-123/")
         - 'bucket': Optional S3 bucket override (default: assinaai-temp)
         - 'ttlSeconds': Optional expiration seconds (default: 86400)
-    Response: JSON containing variables list and presignedUrl
+    Response: JSON containing variables list, pdfKey and presignedUrl
     {
       "variables": ["name", "date"],
+      "pdfKey": "generated-pdfs/abc123.pdf",
       "presignedUrl": "https://..."
     }
     """
@@ -319,7 +322,7 @@ def extract_convert_upload_endpoint():
         docx_content = file.read()
 
         # Execute combined operation with upload
-        variables_list, url = extract_convert_upload_get_url(
+        result = extract_convert_upload_get_url(
             docx_content=docx_content,
             variables=variables,
             bucket_name=bucket_override,
@@ -327,10 +330,7 @@ def extract_convert_upload_endpoint():
             presign_ttl_seconds=ttl_seconds,
         )
 
-        return jsonify({
-            'variables': variables_list,
-            'presignedUrl': url,
-        }), 200
+        return jsonify(result), 200
 
     except BadRequest as e:
         return jsonify({'error': str(e)}), 400
@@ -352,6 +352,137 @@ def internal_error(error):
         'message': str(error)
     }), 500
 
+
+@app.route('/api/replace-variables-from-s3', methods=['POST'])
+def replace_variables_from_s3_endpoint():
+    """
+    Fetch a DOCX from S3 by key, replace variables, convert to PDF, upload both to a target bucket, return keys and URLs.
+
+    Request: multipart/form-data with:
+        - 'sourceBucket': S3 bucket containing the input DOCX (required)
+        - 'sourceKey': S3 key of the input DOCX (required)
+        - 'variables': JSON string; accepts either a dict {name:value} OR an array of objects
+            [{"name":"CEP","type":"CEP","required":false,"order":1,"value":"35570-000"}] (required)
+        - 'targetBucket': S3 bucket to store the modified DOCX and PDF (required)
+        - 'targetPrefix': Optional prefix for uploaded objects (e.g., "processed/")
+        - 'ttlSeconds': Optional expiration seconds for presigned URLs (default: 86400)
+    Response: JSON with variables summary, PDF S3 key, and presigned URL
+    {
+      "variables": "name,date",
+      "pdfKey": "processed/abc.pdf",
+      "pdfUrl": "https://..."
+    }
+    """
+    try:
+        import json
+
+        # Support application/json and multipart/form-data
+        if request.is_json:
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                raise BadRequest("JSON body must be an object")
+
+            source_bucket = data.get('sourceBucket')
+            source_key = data.get('sourceKey')
+            target_bucket = data.get('targetBucket')
+            target_prefix = data.get('targetPrefix')
+            ttl_seconds_raw = data.get('ttlSeconds')
+
+            if not source_bucket:
+                raise BadRequest("sourceBucket is required")
+            if not source_key:
+                raise BadRequest("sourceKey is required")
+            if not target_bucket:
+                raise BadRequest("targetBucket is required")
+
+            variables_raw = data.get('variables')
+            if variables_raw is None:
+                raise BadRequest("variables is required")
+
+            # Handle double-encoded strings (e.g., objectMapper.writeValueAsString applied twice)
+            if isinstance(variables_raw, str):
+                try:
+                    decoded_once = json.loads(variables_raw)
+                    variables_raw = decoded_once
+                except Exception:
+                    pass
+                if isinstance(variables_raw, str) and (variables_raw.strip().startswith('{') or variables_raw.strip().startswith('[')):
+                    try:
+                        variables_raw = json.loads(variables_raw)
+                    except Exception:
+                        pass
+
+            variables = normalize_variables_input(variables_raw)
+            validate_variables_mapping(variables)
+
+            try:
+                ttl_seconds = int(ttl_seconds_raw) if ttl_seconds_raw else 86400
+            except (ValueError, TypeError):
+                raise BadRequest("ttlSeconds must be an integer")
+
+            result = replace_from_s3_convert_and_upload(
+                source_bucket=source_bucket,
+                source_key=source_key,
+                variables=variables,
+                target_bucket=target_bucket,
+                target_prefix=target_prefix,
+                presign_ttl_seconds=ttl_seconds,
+            )
+
+            return jsonify(result), 200
+        else:
+            # multipart/form-data path
+            source_bucket = request.form.get('sourceBucket')
+            source_key = request.form.get('sourceKey')
+            target_bucket = request.form.get('targetBucket')
+            target_prefix = request.form.get('targetPrefix')
+            ttl_seconds_raw = request.form.get('ttlSeconds')
+
+            if not source_bucket:
+                raise BadRequest("sourceBucket is required")
+            if not source_key:
+                raise BadRequest("sourceKey is required")
+            if not target_bucket:
+                raise BadRequest("targetBucket is required")
+
+            variables_json = request.form.get('variables')
+            if not variables_json:
+                raise BadRequest("variables is required and must be a JSON string")
+            try:
+                variables_raw = json.loads(variables_json)
+            except json.JSONDecodeError:
+                # try to accept already-stringified arrays/objects without valid JSON wrapper
+                if variables_json.strip().startswith('{') or variables_json.strip().startswith('['):
+                    variables_raw = json.loads(variables_json)
+                else:
+                    raise BadRequest("Invalid JSON in variables field")
+
+            variables = normalize_variables_input(variables_raw)
+            validate_variables_mapping(variables)
+
+            try:
+                ttl_seconds = int(ttl_seconds_raw) if ttl_seconds_raw else 86400
+            except ValueError:
+                raise BadRequest("ttlSeconds must be an integer")
+
+            result = replace_from_s3_convert_and_upload(
+                source_bucket=source_bucket,
+                source_key=source_key,
+                variables=variables,
+                target_bucket=target_bucket,
+                target_prefix=target_prefix,
+                presign_ttl_seconds=ttl_seconds,
+            )
+
+            return jsonify(result), 200
+
+    except BadRequest as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({
+            'error': 'Failed to replace from S3 and convert',
+            'message': str(e)
+        }), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)

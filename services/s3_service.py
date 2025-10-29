@@ -57,3 +57,18 @@ def generate_presigned_get_url(
     )
 
 
+def get_object_bytes(bucket: str, key: str) -> bytes:
+    """Download an object's bytes from S3.
+
+    Args:
+        bucket: S3 bucket name
+        key: Object key within the bucket
+
+    Returns:
+        Raw bytes of the object
+    """
+    s3 = get_s3_client()
+    resp = s3.get_object(Bucket=bucket, Key=key)
+    return resp["Body"].read()
+
+
